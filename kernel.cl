@@ -57,7 +57,7 @@ __kernel void search(__global struct thread_state *states,
 		 * algorithm is REALLY POOR! It doesn't matter so much, however. It is
 		 * used for tie-breaking in order to prevent us from getting stuck in
 		 * an infinite loop. It should be really fast, however. */
-		state.rnd ^= ((state.rnd << 4) | (state.rnd >> 17)) + 0xcafebabe;
+		state.rnd ^= ((state.rnd << 4) | (state.rnd >> 28)) + 0xcafebabe;
 
 		struct clause c = clause_cache[clause_cache_i];
 		u8 v0 = get_value(values, c.literals[0]);

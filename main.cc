@@ -1,3 +1,10 @@
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <vector>
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -16,7 +23,7 @@ struct thread_state {
 	uint32_t nr_sat_clauses;
 };
 
-struct clause {
+struct gpu_clause {
 	uint16_t literals[4];
 };
 
@@ -25,8 +32,85 @@ void CL_CALLBACK pfn_notify(const char *errinfo, const void *private_info, size_
 	fprintf(stderr, "notify: %s\n", errinfo);
 }
 
+typedef int literal;
+typedef unsigned int variable;
+typedef std::map<variable, variable> variable_map;
+typedef std::vector<literal> clause;
+typedef std::vector<clause> clause_vector;
+
+void read_cnf(const char *filename, variable_map &variables, variable_map &reverse_variables, clause_vector &clauses)
+{
+	std::ifstream file;
+
+	file.open(filename);
+	if (!file) {
+		fprintf(stderr, "ifstream::open() failed\n");
+		exit(EXIT_FAILURE);
+	}
+
+	while (!file.eof()) {
+		std::string line;
+		getline(file, line);
+
+		if (line.size() == 0)
+			continue;
+
+		/* Skip problem line -- we don't use it anyway */
+		if (line[0] == 'p')
+			continue;
+
+		/* Skip comments */
+		if (line[0] == 'c')
+			continue;
+
+		/* XOR clauses */
+		if (line[0] == 'x') {
+			fprintf(stderr, "Cannot read XOR clauses\n");
+			exit(EXIT_FAILURE);
+		}
+
+		clause c;
+
+		std::stringstream s(line);
+		while (!s.eof()) {
+			literal l;
+			s >> l;
+
+			if (l == 0)
+				break;
+
+			variable v = abs(l);
+
+			/* We remap variables to the range [1, n], where n
+			 * is the total number of variables */
+			variable v2;
+			variable_map::iterator it = variables.find(v);
+			if (it == variables.end()) {
+				v2 = 1 + variables.size();
+				variables[v] = v2;
+				reverse_variables[v2] = v;
+			} else {
+				v2 = it->second;
+			}
+
+			c.push_back(v2 * (l < 0 ? -1 : 1));
+		}
+
+		clauses.push_back(c);
+	}
+
+	file.close();
+}
+
 int main(int argc, char *argv[])
 {
+	variable_map variables;
+	variable_map reverse_variables;
+	clause_vector clauses;
+
+	for (int i = 1; i < argc; ++i)
+		read_cnf(argv[i], variables, reverse_variables, clauses);
+
 	cl_uint num_platforms;
 	if (clGetPlatformIDs(0, NULL, &num_platforms) != CL_SUCCESS) {
 		fprintf(stderr, "clGetPlatformIDs() returned failure\n");
@@ -191,7 +275,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	unsigned int nr_variables = 140;
+	unsigned int nr_variables = 1 + variables.size();
 
 	uint8_t host_variables[nr_variables][nr_threads];
 
@@ -211,19 +295,35 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	unsigned int nr_clauses = nr_threads * 1;
+	unsigned int nr_clauses = clauses.size() + nr_threads - (clauses.size() % nr_threads);
 
-	clause host_clauses[nr_clauses];
-	for (unsigned int i = 0; i < nr_clauses; ++i) {
-		host_clauses[i].literals[0] = rand() % nr_variables;
-		host_clauses[i].literals[1] = rand() % nr_variables;
-		host_clauses[i].literals[2] = rand() % nr_variables;
-		host_clauses[i].literals[3] = 0;
+	gpu_clause host_clauses[nr_clauses];
+	for (unsigned int i = 0; i < clauses.size(); ++i) {
+		clause &c = clauses[i];
+
+		assert(c.size() >= 1 && c.size() <= 4);
+		for (unsigned int j = 0; j < c.size(); ++j) {
+			literal l = c[j];
+			unsigned int var = abs(l);
+			unsigned int sign = (l < 0);
+
+			host_clauses[i].literals[j] = (var << 1) | sign;
+		}
+
+		/* Fill the rest of the clause with unsatisfied literals */
+		for (unsigned int j = c.size(); j < 4; ++j)
+			host_clauses[i].literals[j] = 0;
 	}
 
-	/* XXX: Could be read-only for now, but we may want to write to it
-	 * later. */
-	cl_mem clauses = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+	/* Create trivially true clauses to fill the remaining clause slots. */
+	for (unsigned int i = clauses.size(); i < nr_clauses; ++i) {
+		host_clauses[i].literals[0] = 1;
+		host_clauses[i].literals[1] = 1;
+		host_clauses[i].literals[2] = 1;
+		host_clauses[i].literals[3] = 1;
+	}
+
+	cl_mem device_clauses = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
 		sizeof(host_clauses), host_clauses, &err);
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "clCreateBuffer() failed\n");
@@ -251,12 +351,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	if (clSetKernelArg(kernel, 3, sizeof(clauses), &clauses) != CL_SUCCESS) {
-		fprintf(stderr, "clSetKernelArg() failed\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if (clSetKernelArg(kernel, 4, sizeof(clause_i), &clause_i) != CL_SUCCESS) {
+	if (clSetKernelArg(kernel, 3, sizeof(device_clauses), &device_clauses) != CL_SUCCESS) {
 		fprintf(stderr, "clSetKernelArg() failed\n");
 		exit(EXIT_FAILURE);
 	}
@@ -273,43 +368,105 @@ int main(int argc, char *argv[])
 	size_t global_work_size = nr_threads;
 	size_t local_work_size = nr_threads;
 
-	if ((err = clEnqueueNDRangeKernel(queue, kernel, 1,
-		&global_work_offset,
-		&global_work_size,
-		&local_work_size,
-		0, NULL, NULL)) != CL_SUCCESS)
-	{
-		printf("%d\n", err);
+	while (1) {
+		printf("c clause index: %u/%u\n", clause_i, nr_clauses);
 
-		fprintf(stderr, "clEnqueue() failed\n");
-		exit(EXIT_FAILURE);
+		if (clSetKernelArg(kernel, 4, sizeof(clause_i), &clause_i) != CL_SUCCESS) {
+			fprintf(stderr, "clSetKernelArg() failed\n");
+			exit(EXIT_FAILURE);
+		}
+
+		if ((err = clEnqueueNDRangeKernel(queue, kernel, 1,
+			&global_work_offset,
+			&global_work_size,
+			&local_work_size,
+			0, NULL, NULL)) != CL_SUCCESS)
+		{
+			printf("%d\n", err);
+
+			fprintf(stderr, "clEnqueue() failed\n");
+			exit(EXIT_FAILURE);
+		}
+
+		if (clEnqueueReadBuffer(queue, threads, CL_TRUE, 0,
+			sizeof(host_threads), host_threads, 0, NULL, NULL) != CL_SUCCESS)
+		{
+			fprintf(stderr, "clEnqueueReadBuffer() failed\n");
+			exit(EXIT_FAILURE);
+		}
+
+		if (clFinish(queue) != CL_SUCCESS) {
+			fprintf(stderr, "clFinish() failed\n");
+			exit(EXIT_FAILURE);
+		}
+
+		bool found_solution = false;
+		unsigned int max_nr_sat_clauses = 0;
+
+		for (unsigned int i = 0; i < nr_threads; ++i) {
+			unsigned int nr_sat_clauses = host_threads[i].nr_sat_clauses;
+
+			if (nr_sat_clauses > max_nr_sat_clauses)
+				max_nr_sat_clauses = nr_sat_clauses;
+
+			if (nr_sat_clauses < nr_clauses)
+				continue;
+
+			if (!found_solution) {
+				/* Fetch all the threads' current valuations
+				 * if we didn't already */
+				if (clEnqueueReadBuffer(queue, values, CL_TRUE, 0,
+					sizeof(host_variables), host_variables, 0, NULL, NULL) != CL_SUCCESS)
+				{
+					fprintf(stderr, "clEnqueueReadBuffer() failed\n");
+					exit(EXIT_FAILURE);
+				}
+
+				if (clFinish(queue) != CL_SUCCESS) {
+					fprintf(stderr, "clFinish() failed\n");
+					exit(EXIT_FAILURE);
+				}
+			}
+
+			/* We have a solution! */
+			found_solution = true;
+
+			/* Double-check on the host that this is a correct solution. */
+			for (unsigned int j = 0; j < clauses.size(); ++j) {
+				clause &c = clauses[j];
+
+				bool value = false;
+				for (unsigned int k = 0; k < c.size(); ++k) {
+					literal l = c[k];
+					unsigned int var = abs(l);
+					unsigned int sign = (l < 0);
+
+					value |= host_variables[var][i] ^ sign;
+				}
+
+				assert(value);
+			}
+
+			printf("v");
+			for (unsigned int j = 1; j < nr_variables; ++j) {
+				unsigned int v = reverse_variables[j];
+				printf(" %d", host_variables[j][i] ? v : -v);
+			}
+
+			printf("\n");
+		}
+
+		if (found_solution)
+			break;
+
+		printf("c best: %u\n", max_nr_sat_clauses);
+
+		clause_i = (clause_i + n) % nr_clauses;
 	}
-
-	if (clEnqueueReadBuffer(queue, threads, CL_TRUE, 0,
-		sizeof(host_threads), host_threads, 0, NULL, NULL) != CL_SUCCESS)
-	{
-		fprintf(stderr, "clEnqueueReadBuffer() failed\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if (clFinish(queue) != CL_SUCCESS) {
-		fprintf(stderr, "clFinish() failed\n");
-		exit(EXIT_FAILURE);
-	}
-
-	for (unsigned int i = 0; i < nr_threads; ++i) {
-		unsigned int x = host_threads[i].nr_sat_clauses;
-		if (x > nr_clauses)
-			x = nr_clauses;
-
-		printf("%u ", x);
-	}
-
-	printf("\n");
 
 	clReleaseMemObject(threads);
 	clReleaseMemObject(values);
-	clReleaseMemObject(clauses);
+	clReleaseMemObject(device_clauses);
 
 	clReleaseKernel(kernel);
 	clReleaseProgram(program);
