@@ -7,6 +7,7 @@
 
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 
 #include <assert.h>
@@ -364,6 +365,12 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	struct timeval tv_a;
+	if (gettimeofday(&tv_a, NULL) == -1) {
+		fprintf(stderr, "gettimeofday() failed\n");
+		exit(EXIT_FAILURE);
+	}
+
 	size_t global_work_offset = 0;
 	size_t global_work_size = nr_threads;
 	size_t local_work_size = nr_threads;
@@ -463,6 +470,16 @@ int main(int argc, char *argv[])
 
 		clause_i = (clause_i + n) % nr_clauses;
 	}
+
+	struct timeval tv_b;
+	if (gettimeofday(&tv_b, NULL) == -1) {
+		fprintf(stderr, "gettimeofday() failed\n");
+		exit(EXIT_FAILURE);
+	}
+
+	struct timeval tv_delta;
+	timersub(&tv_b, &tv_a, &tv_delta);
+	fprintf(stderr, "c Wall time: %lu.%06lu\n", tv_delta.tv_sec, tv_delta.tv_usec);
 
 	clReleaseMemObject(threads);
 	clReleaseMemObject(values);
