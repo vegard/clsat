@@ -1,0 +1,35 @@
+clsat - OpenCL SAT solver
+-------------------------
+
+clsat is a small, incomplete, stochastic local search, OpenCL-based SAT
+solver.
+
+The algorithm is as follows:
+ - Iterate over all the clauses in the instance
+ - Evaluate each clause under the current valuation
+ - If a clause is unsatisfied, flip the current value of one of the
+   unsatisfied literals
+ - Keep going until all the clauses are satisfied
+
+The implementation is designed to work well on GPUs, e.g. by having all
+threads examine the same clause at the same time, utilising local/shared
+memory, eliminating branches, etc.
+
+
+Compiling
+---------
+
+You need to have the AMD APP SDK installed to compile and run the program.
+
+    $ g++ -Wall -g -I<path/to/AMD-APP-SDK>/include -L<path/to/AMD-APP-SDK>/lib/<arch> main.cc -lOpenCL
+
+
+To-do
+-----
+
+ - Split clauses of length > 4 into many smaller clauses
+ - Support for XOR clauses
+ - Use u32 for literals (we are currently limited to 32,767 variables)
+ - Optimisations!
+    - Different types may be faster
+    - Use vector types/operations if/where possible
