@@ -105,6 +105,9 @@ void read_cnf(const char *filename, variable_map &variables, variable_map &rever
 
 int main(int argc, char *argv[])
 {
+	/* XXX: Use mersenne twister */
+	srand(time(NULL));
+
 	variable_map variables;
 	variable_map reverse_variables;
 	clause_vector clauses;
