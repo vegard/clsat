@@ -44,7 +44,7 @@ struct thread_state {
 };
 
 struct gpu_clause {
-	uint16_t literals[4];
+	uint32_t literals[4];
 };
 
 void CL_CALLBACK pfn_notify(const char *errinfo, const void *private_info, size_t cb, void *user_data)
@@ -284,7 +284,7 @@ int main(int argc, char *argv[])
 
 	unsigned int nr_threads = 256;
 
-	struct thread_state host_threads[nr_threads];
+	struct thread_state *host_threads = new thread_state[nr_threads];
 
 	for (unsigned int i = 0; i < nr_threads; ++i) {
 		host_threads[i].rnd = i;
@@ -292,7 +292,7 @@ int main(int argc, char *argv[])
 	}
 
 	cl_mem threads = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-		sizeof(host_threads), host_threads, &err);
+		nr_threads * sizeof(*host_threads), host_threads, &err);
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "clCreateBuffer() failed\n");
 		exit(EXIT_FAILURE);
@@ -300,19 +300,19 @@ int main(int argc, char *argv[])
 
 	unsigned int nr_variables = 1 + variables.size();
 
-	uint8_t host_variables[nr_variables][nr_threads];
+	uint8_t *host_variables = new uint8_t[nr_variables * nr_threads];
 
 	/* Variable 0 is always false. */
 	for (unsigned int j = 0; j < nr_threads; ++j)
-		host_variables[0][j] = 0;
+		host_variables[0 * nr_threads + j] = 0;
 
 	for (unsigned int i = 1; i < nr_variables; ++i) {
 		for (unsigned int j = 0; j < nr_threads; ++j)
-			host_variables[i][j] = rand() % 2;
+			host_variables[i * nr_threads + j] = rand() % 2;
 	}
 
 	cl_mem values = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-		sizeof(host_variables), host_variables, &err);
+		nr_variables * nr_threads * sizeof(*host_variables), host_variables, &err);
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "clCreateBuffer() failed\n");
 		exit(EXIT_FAILURE);
@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
 
 	unsigned int nr_clauses = clauses.size() + nr_threads - (clauses.size() % nr_threads);
 
-	gpu_clause host_clauses[nr_clauses];
+	gpu_clause *host_clauses = new gpu_clause[nr_clauses];
 	for (unsigned int i = 0; i < clauses.size(); ++i) {
 		clause &c = clauses[i];
 
@@ -347,7 +347,7 @@ int main(int argc, char *argv[])
 	}
 
 	cl_mem device_clauses = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-		sizeof(host_clauses), host_clauses, &err);
+		nr_clauses * sizeof(*host_clauses), host_clauses, &err);
 	if (err != CL_SUCCESS) {
 		fprintf(stderr, "clCreateBuffer() failed\n");
 		exit(EXIT_FAILURE);
@@ -418,7 +418,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (clEnqueueReadBuffer(queue, threads, CL_TRUE, 0,
-			sizeof(host_threads), host_threads, 0, NULL, NULL) != CL_SUCCESS)
+			nr_threads * sizeof(*host_threads), host_threads, 0, NULL, NULL) != CL_SUCCESS)
 		{
 			fprintf(stderr, "clEnqueueReadBuffer() failed\n");
 			exit(EXIT_FAILURE);
@@ -445,7 +445,8 @@ int main(int argc, char *argv[])
 				/* Fetch all the threads' current valuations
 				 * if we didn't already */
 				if (clEnqueueReadBuffer(queue, values, CL_TRUE, 0,
-					sizeof(host_variables), host_variables, 0, NULL, NULL) != CL_SUCCESS)
+					nr_threads * nr_variables * sizeof(*host_variables),
+					host_variables, 0, NULL, NULL) != CL_SUCCESS)
 				{
 					fprintf(stderr, "clEnqueueReadBuffer() failed\n");
 					exit(EXIT_FAILURE);
@@ -470,7 +471,7 @@ int main(int argc, char *argv[])
 					unsigned int var = abs(l);
 					unsigned int sign = (l < 0);
 
-					value |= host_variables[var][i] ^ sign;
+					value |= host_variables[var * nr_threads + i] ^ sign;
 				}
 
 				assert(value);
@@ -479,7 +480,7 @@ int main(int argc, char *argv[])
 			printf("v");
 			for (unsigned int j = 1; j < nr_variables; ++j) {
 				unsigned int v = reverse_variables[j];
-				printf(" %d", host_variables[j][i] ? v : -v);
+				printf(" %d", host_variables[j * nr_threads + i] ? v : -v);
 			}
 
 			printf("\n");
@@ -502,6 +503,10 @@ int main(int argc, char *argv[])
 	struct timeval tv_delta;
 	timersub(&tv_b, &tv_a, &tv_delta);
 	fprintf(stderr, "c Wall time: %lu.%06lu\n", tv_delta.tv_sec, tv_delta.tv_usec);
+
+	delete[] host_threads;
+	delete[] host_variables;
+	delete[] host_clauses;
 
 	clReleaseMemObject(threads);
 	clReleaseMemObject(values);

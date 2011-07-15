@@ -30,7 +30,7 @@ struct thread_state {
 };
 
 struct clause {
-	u16 literals[4];
+	u32 literals[4];
 };
 
 inline u32 bits(u32 rnd, const unsigned int i, const unsigned int n)
@@ -38,18 +38,18 @@ inline u32 bits(u32 rnd, const unsigned int i, const unsigned int n)
 	return (rnd >> i) & ((1U << n) - 1);
 }
 
-u8 get_value(__global u8 *values, u16 lit)
+u8 get_value(__global u8 *values, u32 lit)
 {
 	bool sign = lit & 1;
-	u16 var = lit >> 1;
+	u32 var = lit >> 1;
 
 	return values[var * LOCAL_SIZE_0 + get_local_id(0)] ^ sign;
 }
 
-void set_value(__global u8 *values, u16 lit, u8 value)
+void set_value(__global u8 *values, u32 lit, u8 value)
 {
 	bool sign = lit & 1;
-	u16 var = lit >> 1;
+	u32 var = lit >> 1;
 
 	values[var * LOCAL_SIZE_0 + get_local_id(0)] = value ^ sign;
 }
